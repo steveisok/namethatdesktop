@@ -26,6 +26,12 @@ func CGSCopyManagedDisplaySpaces(_ cid: Int32) -> CFArray?
 @_silgen_name("CGSManagedDisplaySetCurrentSpace")
 func CGSManagedDisplaySetCurrentSpace(_ cid: Int32, _ display: CFString, _ space: Int)
 
+@_silgen_name("CGSHideSpaces")
+func CGSHideSpaces(_ cid: Int32, _ spaces: NSArray)
+
+@_silgen_name("CGSShowSpaces")
+func CGSShowSpaces(_ cid: Int32, _ spaces: NSArray)
+
 // MARK: - Helpers
 
 func sh(_ cmd: String) -> String {
@@ -280,6 +286,9 @@ class DesktopNamer: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func switchSpace(_ sender: NSMenuItem) {
         let spaceID = sender.tag
         guard let display = displayForSpace(spaceID) else { return }
+        let currentSpace = Int(activeSpaceID()) ?? 0
+        CGSHideSpaces(cid, [currentSpace] as NSArray)
+        CGSShowSpaces(cid, [spaceID] as NSArray)
         CGSManagedDisplaySetCurrentSpace(cid, display, spaceID)
         refresh()
     }
