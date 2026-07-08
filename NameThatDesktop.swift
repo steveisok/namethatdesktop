@@ -88,9 +88,10 @@ class DesktopNamer: NSObject, NSApplicationDelegate, NSMenuDelegate {
                        object: nil)
 
         if autoMode { startPolling() }
-        // Lightweight poll to catch space changes the notification misses
+        // Lightweight poll to catch space/focus changes the notification
+        // misses (e.g. moving focus between displays fires no notification).
         spaceCheckTimer = Timer.scheduledTimer(
-            withTimeInterval: 1, repeats: true) { [weak self] _ in
+            withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             guard let self = self else { return }
             let cur = self.activeSpaceID()
             if cur != self.lastSpaceID { self.refresh() }
@@ -103,20 +104,26 @@ class DesktopNamer: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var cid: Int32 { CGSMainConnectionID() }
 
     private func activeSpaceID() -> String {
-        // "Current Space" from CGSCopyManagedDisplaySpaces reflects the
-        // globally active space, unlike CGSGetActiveSpace which can be
-        // stale for menu-bar-only apps.
+        // With multiple displays, each has its own visible ("Current") space.
+        // The desktop the user is actually on is the one whose display owns the
+        // globally-active space reported by CGSGetActiveSpace. Blindly taking
+        // the first display's Current Space pins the label to the primary
+        // monitor and makes it "stick" while working on a secondary display.
+        let active = CGSGetActiveSpace(cid)
         guard let arr = CGSCopyManagedDisplaySpaces(cid)
                 as? [[String: Any]] else {
-            return String(CGSGetActiveSpace(cid))
+            return String(active)
         }
+        var firstCurrent: Int?
         for display in arr {
-            if let cur = display["Current Space"] as? [String: Any],
-               let mid = cur["ManagedSpaceID"] as? Int {
-                return String(mid)
-            }
+            guard let mid = (display["Current Space"] as? [String: Any])?[
+                    "ManagedSpaceID"] as? Int else { continue }
+            if firstCurrent == nil { firstCurrent = mid }
+            if mid == active { return String(active) }
         }
-        return String(CGSGetActiveSpace(cid))
+        // Active space isn't a managed desktop (e.g. a fullscreen window);
+        // fall back to the first display's current space.
+        return String(firstCurrent ?? active)
     }
 
     /// All regular (non-fullscreen) desktop spaces with ordinal numbers.
@@ -140,16 +147,24 @@ class DesktopNamer: NSObject, NSApplicationDelegate, NSMenuDelegate {
         allSpaces().first(where: { $0.id == sid })?.num ?? 0
     }
 
-    /// Returns the display UUID that owns a given space ID.
-    private func displayForSpace(_ spaceID: Int) -> CFString? {
+    /// Locates the display that owns `spaceID`, returning both that display's
+    /// identifier and the space currently visible on it. Hiding the *owning
+    /// display's* current space (rather than the globally active one) is what
+    /// makes switching work on secondary monitors.
+    private func displayInfoForSpace(_ spaceID: Int)
+        -> (display: CFString, currentSpace: Int?)? {
         guard let arr = CGSCopyManagedDisplaySpaces(cid)
                 as? [[String: Any]] else { return nil }
         for display in arr {
             let uuid = display["Display Identifier"] as? String ?? ""
-            for space in display["Spaces"] as? [[String: Any]] ?? [] {
-                if space["ManagedSpaceID"] as? Int == spaceID {
-                    return uuid as CFString
-                }
+            let spaces = display["Spaces"] as? [[String: Any]] ?? []
+            let ownsTarget = spaces.contains {
+                $0["ManagedSpaceID"] as? Int == spaceID
+            }
+            if ownsTarget {
+                let cur = (display["Current Space"] as? [String: Any])?[
+                    "ManagedSpaceID"] as? Int
+                return (uuid as CFString, cur)
             }
         }
         return nil
@@ -285,11 +300,15 @@ class DesktopNamer: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func switchSpace(_ sender: NSMenuItem) {
         let spaceID = sender.tag
-        guard let display = displayForSpace(spaceID) else { return }
-        let currentSpace = Int(activeSpaceID()) ?? 0
-        CGSHideSpaces(cid, [currentSpace] as NSArray)
+        guard spaceID != 0,
+              let info = displayInfoForSpace(spaceID) else { return }
+        // Nothing to do if this space is already showing on its display.
+        guard info.currentSpace != spaceID else { return }
+        if let cur = info.currentSpace {
+            CGSHideSpaces(cid, [cur] as NSArray)
+        }
         CGSShowSpaces(cid, [spaceID] as NSArray)
-        CGSManagedDisplaySetCurrentSpace(cid, display, spaceID)
+        CGSManagedDisplaySetCurrentSpace(cid, info.display, spaceID)
         refresh()
     }
 
